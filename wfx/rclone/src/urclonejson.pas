@@ -67,16 +67,27 @@ var
   JsonData: TJSONData;
   JsonArray: TJSONArray;
   JsonObj: TJSONObject;
-  I: Integer;
+  I, StartPos: Integer;
   RcloneFile: TRcloneFile;
+  Text: AnsiString;
 begin
   Result := TRcloneFileList.Create(True);
 
-  if Trim(JsonOutput) = '' then
+  Text := Trim(JsonOutput);
+  if Text = '' then
     Exit;
 
+  // Be tolerant of anything printed before the array (log lines, warnings)
+  if Text[1] <> '[' then
+  begin
+    StartPos := Pos('[', Text);
+    if StartPos = 0 then
+      Exit;
+    Text := Copy(Text, StartPos, Length(Text) - StartPos + 1);
+  end;
+
   try
-    JsonData := GetJSON(JsonOutput);
+    JsonData := GetJSON(Text);
     try
       if not (JsonData is TJSONArray) then
         Exit;
@@ -134,11 +145,12 @@ begin
     for I := 0 to Lines.Count - 1 do
     begin
       RemoteName := Trim(Lines[I]);
-      // rclone listremotes outputs "remotename:" - remove the trailing colon
-      if (Length(RemoteName) > 0) and (RemoteName[Length(RemoteName)] = ':') then
-        RemoteName := Copy(RemoteName, 1, Length(RemoteName) - 1);
-      if RemoteName <> '' then
-        Result.Add(RemoteName);
+      // rclone listremotes outputs "remotename:" - anything without the
+      // trailing colon is not a remote (e.g. a stray log line)
+      if (Length(RemoteName) < 2) or (RemoteName[Length(RemoteName)] <> ':') then
+        Continue;
+      RemoteName := Copy(RemoteName, 1, Length(RemoteName) - 1);
+      Result.Add(RemoteName);
     end;
   finally
     Lines.Free;

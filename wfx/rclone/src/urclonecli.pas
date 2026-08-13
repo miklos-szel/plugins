@@ -27,7 +27,7 @@ unit uRcloneCli;
 interface
 
 uses
-  Classes, SysUtils, Process, WfxPlugin, uRcloneJson;
+  Classes, SysUtils, Process, Pipes, WfxPlugin, uRcloneJson;
 
 type
   TProgressCallback = function(SourceName, TargetName: PWideChar;
@@ -40,7 +40,7 @@ type
     FProgressProc: TProgressCallback;
     FPluginNr: Integer;
     function RunCommand(const Args: array of AnsiString; out Output: AnsiString;
-      out ExitCode: Integer): Boolean;
+      out ErrorOutput: AnsiString; out ExitCode: Integer): Boolean;
     function RunCommandWithProgress(const Args: array of AnsiString;
       const SourceName, TargetName: UnicodeString;
       out ExitCode: Integer): Boolean;
@@ -159,23 +159,44 @@ begin
   Result := GetHomeDir + '/.config/rclone/rclone.conf';
 end;
 
+{ Read everything currently buffered in a pipe without blocking.
+  Returns the number of bytes appended to AStream. }
+function DrainPipe(APipe: TInputPipeStream; AStream: TStringStream): Integer;
+var
+  Buffer: array[0..4095] of Byte;
+  Avail, BytesRead: Integer;
+begin
+  Result := 0;
+  if APipe = nil then Exit;
+  repeat
+    Avail := APipe.NumBytesAvailable;
+    if Avail <= 0 then Break;
+    if Avail > SizeOf(Buffer) then
+      Avail := SizeOf(Buffer);
+    BytesRead := APipe.Read(Buffer, Avail);
+    if BytesRead <= 0 then Break;
+    AStream.Write(Buffer, BytesRead);
+    Inc(Result, BytesRead);
+  until False;
+end;
+
 function TRcloneCli.RunCommand(const Args: array of AnsiString;
-  out Output: AnsiString; out ExitCode: Integer): Boolean;
+  out Output: AnsiString; out ErrorOutput: AnsiString; out ExitCode: Integer): Boolean;
 var
   AProcess: TProcess;
   I: Integer;
-  OutputStream: TStringStream;
-  BytesRead: Integer;
-  Buffer: array[0..4095] of Byte;
+  OutputStream, ErrorStream: TStringStream;
   ConfigPath: AnsiString;
 begin
   Result := False;
   Output := '';
+  ErrorOutput := '';
   ExitCode := -1;
   FLastError := '';
 
   AProcess := TProcess.Create(nil);
   OutputStream := TStringStream.Create('');
+  ErrorStream := TStringStream.Create('');
   try
     AProcess.Executable := FRclonePath;
 
@@ -194,30 +215,27 @@ begin
     AProcess.Environment.Add('PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin');
     AProcess.Environment.Add('HOME=' + GetHomeDir);
 
-    AProcess.Options := [poUsePipes, poStderrToOutPut, poNoConsole];
+    // Keep stderr separate: rclone writes log messages (e.g. the SFTP
+    // "No host key validation is being performed" NOTICE) to stderr, and
+    // merging them into stdout would corrupt the JSON of lsjson & friends.
+    AProcess.Options := [poUsePipes, poNoConsole];
 
     try
       AProcess.Execute;
 
-      // Read output
-      while AProcess.Running or (AProcess.Output.NumBytesAvailable > 0) do
-      begin
-        BytesRead := AProcess.Output.Read(Buffer, SizeOf(Buffer));
-        if BytesRead > 0 then
-          OutputStream.Write(Buffer, BytesRead)
-        else
-          Sleep(10);
-      end;
-
-      // Read any remaining output
+      // Drain both pipes until the process is gone and nothing is left
       repeat
-        BytesRead := AProcess.Output.Read(Buffer, SizeOf(Buffer));
-        if BytesRead > 0 then
-          OutputStream.Write(Buffer, BytesRead);
-      until BytesRead = 0;
+        if DrainPipe(AProcess.Output, OutputStream) +
+           DrainPipe(AProcess.Stderr, ErrorStream) = 0 then
+        begin
+          if not AProcess.Running then Break;
+          Sleep(10);
+        end;
+      until False;
 
       ExitCode := AProcess.ExitCode;
       Output := OutputStream.DataString;
+      ErrorOutput := ErrorStream.DataString;
       Result := True;
     except
       on E: Exception do
@@ -227,6 +245,7 @@ begin
       end;
     end;
   finally
+    ErrorStream.Free;
     OutputStream.Free;
     AProcess.Free;
   end;
@@ -378,27 +397,30 @@ end;
 
 function TRcloneCli.ListRemotes: TStringList;
 var
-  Output: AnsiString;
+  Output, ErrorOutput: AnsiString;
   ExitCode: Integer;
 begin
   Result := nil;
-  if RunCommand(['listremotes'], Output, ExitCode) and (ExitCode = 0) then
+  if RunCommand(['listremotes'], Output, ErrorOutput, ExitCode) and (ExitCode = 0) then
     Result := ParseListRemotes(Output)
   else
+  begin
+    FLastError := ErrorOutput;
     Result := TStringList.Create;
+  end;
 end;
 
 function TRcloneCli.ListDirectory(const RemotePath: AnsiString): TRcloneFileList;
 var
-  Output: AnsiString;
+  Output, ErrorOutput: AnsiString;
   ExitCode: Integer;
 begin
   Result := nil;
-  if RunCommand(['lsjson', RemotePath], Output, ExitCode) and (ExitCode = 0) then
+  if RunCommand(['lsjson', RemotePath], Output, ErrorOutput, ExitCode) and (ExitCode = 0) then
     Result := ParseLsJson(Output)
   else
   begin
-    FLastError := Output;
+    FLastError := ErrorOutput;
     Result := TRcloneFileList.Create(True);
   end;
 end;
@@ -441,42 +463,42 @@ end;
 
 function TRcloneCli.DeleteFile(const RemotePath: AnsiString): Boolean;
 var
-  Output: AnsiString;
+  Output, ErrorOutput: AnsiString;
   ExitCode: Integer;
 begin
-  Result := RunCommand(['delete', RemotePath], Output, ExitCode) and (ExitCode = 0);
+  Result := RunCommand(['delete', RemotePath], Output, ErrorOutput, ExitCode) and (ExitCode = 0);
   if not Result then
-    FLastError := Output;
+    FLastError := ErrorOutput;
 end;
 
 function TRcloneCli.DeleteDir(const RemotePath: AnsiString): Boolean;
 var
-  Output: AnsiString;
+  Output, ErrorOutput: AnsiString;
   ExitCode: Integer;
 begin
-  Result := RunCommand(['rmdir', RemotePath], Output, ExitCode) and (ExitCode = 0);
+  Result := RunCommand(['rmdir', RemotePath], Output, ErrorOutput, ExitCode) and (ExitCode = 0);
   if not Result then
-    FLastError := Output;
+    FLastError := ErrorOutput;
 end;
 
 function TRcloneCli.MakeDir(const RemotePath: AnsiString): Boolean;
 var
-  Output: AnsiString;
+  Output, ErrorOutput: AnsiString;
   ExitCode: Integer;
 begin
-  Result := RunCommand(['mkdir', RemotePath], Output, ExitCode) and (ExitCode = 0);
+  Result := RunCommand(['mkdir', RemotePath], Output, ErrorOutput, ExitCode) and (ExitCode = 0);
   if not Result then
-    FLastError := Output;
+    FLastError := ErrorOutput;
 end;
 
 function TRcloneCli.MoveFile(const OldPath, NewPath: AnsiString): Boolean;
 var
-  Output: AnsiString;
+  Output, ErrorOutput: AnsiString;
   ExitCode: Integer;
 begin
-  Result := RunCommand(['moveto', OldPath, NewPath], Output, ExitCode) and (ExitCode = 0);
+  Result := RunCommand(['moveto', OldPath, NewPath], Output, ErrorOutput, ExitCode) and (ExitCode = 0);
   if not Result then
-    FLastError := Output;
+    FLastError := ErrorOutput;
 end;
 
 function RcloneExitToWfx(ExitCode: Integer; const ErrorOutput: AnsiString): Integer;
