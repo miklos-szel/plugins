@@ -52,10 +52,12 @@ type
     { Initialize with callback functions }
     procedure Initialize(PluginNr: Integer; ProgressProc: TProgressCallback);
 
-    { List all configured remotes }
+    { List all configured remotes. Returns nil if rclone failed; an empty list
+      means rclone succeeded and there are no remotes. LastError has the details. }
     function ListRemotes: TStringList;
 
-    { List directory contents }
+    { List directory contents. Returns nil if rclone failed; an empty list means
+      rclone succeeded and the directory is empty. LastError has the details. }
     function ListDirectory(const RemotePath: RawByteString): TRcloneFileList;
 
     { File operations }
@@ -415,10 +417,7 @@ begin
   if RunCommand(['listremotes'], Output, ErrorOutput, ExitCode) and (ExitCode = 0) then
     Result := ParseListRemotes(Output)
   else
-  begin
     FLastError := ErrorOutput;
-    Result := TStringList.Create;
-  end;
 end;
 
 function TRcloneCli.ListDirectory(const RemotePath: RawByteString): TRcloneFileList;
@@ -430,10 +429,7 @@ begin
   if RunCommand(['lsjson', RemotePath], Output, ErrorOutput, ExitCode) and (ExitCode = 0) then
     Result := ParseLsJson(Output)
   else
-  begin
     FLastError := ErrorOutput;
-    Result := TRcloneFileList.Create(True);
-  end;
 end;
 
 function TRcloneCli.CopyToLocal(const RemotePath, LocalPath: RawByteString): Integer;
