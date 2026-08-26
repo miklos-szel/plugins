@@ -46,30 +46,30 @@ type
     property Items[Index: Integer]: TRcloneFile read GetItem; default;
   end;
 
-{ Parse rclone lsjson output }
-function ParseLsJson(const JsonOutput: AnsiString): TRcloneFileList;
+{ Parse rclone lsjson output (raw UTF-8 bytes as printed by rclone) }
+function ParseLsJson(const JsonOutput: RawByteString): TRcloneFileList;
 
 { Parse rclone listremotes output }
-function ParseListRemotes(const Output: AnsiString): TStringList;
+function ParseListRemotes(const Output: RawByteString): TStringList;
 
 implementation
 
 uses
-  fpjson, jsonparser;
+  fpjson, jsonparser, uRcloneUtil;
 
 function TRcloneFileList.GetItem(Index: Integer): TRcloneFile;
 begin
   Result := TRcloneFile(inherited Items[Index]);
 end;
 
-function ParseLsJson(const JsonOutput: AnsiString): TRcloneFileList;
+function ParseLsJson(const JsonOutput: RawByteString): TRcloneFileList;
 var
   JsonData: TJSONData;
   JsonArray: TJSONArray;
   JsonObj: TJSONObject;
   I, StartPos: Integer;
   RcloneFile: TRcloneFile;
-  Text: AnsiString;
+  Text: RawByteString;
 begin
   Result := TRcloneFileList.Create(True);
 
@@ -102,9 +102,10 @@ begin
         JsonObj := TJSONObject(JsonArray.Items[I]);
         RcloneFile := TRcloneFile.Create;
 
-        // Parse Name
+        // Parse Name. The explicit TJSONStringType cast picks the byte-string
+        // overload of Get, so the name arrives as UTF-8 and is decoded exactly once.
         if JsonObj.Find('Name') <> nil then
-          RcloneFile.Name := UTF8Decode(JsonObj.Get('Name', ''));
+          RcloneFile.Name := UTF8ToWide(JsonObj.Get('Name', TJSONStringType('')));
 
         // Parse Size
         if JsonObj.Find('Size') <> nil then
@@ -132,11 +133,11 @@ begin
   end;
 end;
 
-function ParseListRemotes(const Output: AnsiString): TStringList;
+function ParseListRemotes(const Output: RawByteString): TStringList;
 var
   Lines: TStringList;
   I: Integer;
-  RemoteName: AnsiString;
+  RemoteName: RawByteString;
 begin
   Result := TStringList.Create;
   Lines := TStringList.Create;
